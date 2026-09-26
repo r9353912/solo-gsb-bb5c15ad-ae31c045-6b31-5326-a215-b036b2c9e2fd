@@ -4,6 +4,7 @@ import type {
   Annotation,
   AnnotationBaseline,
   ConflictRule,
+  RelationCardinalityRule,
   SampleConfig,
   SampleReview,
   SampleTarget,
@@ -15,7 +16,7 @@ import type { ConflictItem } from '../lib/conflicts'
 import type { CoverageIssue, CoverageResult } from '../lib/coverage'
 import type { SnapshotDiffItem } from '../lib/snapshot'
 import type { SampleQueueResult } from '../lib/sampling'
-import type { RelationView } from '../lib/relations'
+import type { RelationCardinalityAudit, RelationView } from '../lib/relations'
 import { SnapshotSection } from './SnapshotSection'
 import { SamplingSection } from './SamplingSection'
 import { DatasetSplitSection } from './DatasetSplitSection'
@@ -64,8 +65,14 @@ interface Props {
   datasetSplitSectionRef?: RefObject<HTMLElement | null>
   /** 标注关系 */
   relationViews: RelationView[]
+  /** 关系基数上限规则（按关系类型；空数组表示未配置） */
+  relationCardinalityRules: RelationCardinalityRule[]
+  /** 基数上限审计结果（由 App 从关系视图与规则派生） */
+  relationCardinalityAudit: RelationCardinalityAudit
   onCreateRelation: (sourceId: string, targetId: string, type: string) => void
   onDeleteRelation: (id: string) => void
+  /** 保存基数上限规则（整体替换；保存前清洗） */
+  onSaveRelationCardinalityRules: (rules: RelationCardinalityRule[]) => void
   /** 标注关系分区的滚动定位 ref（顶栏按钮用） */
   relationsSectionRef?: RefObject<HTMLElement | null>
   onFocus: (a: Annotation) => void
@@ -487,6 +494,7 @@ export const Sidebar = forwardRef<HTMLElement, Props>(function Sidebar(props, se
     props.coverageResult.gapCount + props.coverageResult.overlapCount
   const activeRelationCount = props.relationViews.filter((v) => v.active).length
   const invalidRelationReportCount = props.relationViews.length - activeRelationCount
+  const relationViolationReportCount = props.relationCardinalityAudit.violationCount
   // 批量操作筛选用：仅当前标注中实际使用的标签（标签重命名 / 删除后随之更新）
   const annotationTagSet = new Set<string>()
   props.annotations.forEach((a) => a.tags.forEach((t) => annotationTagSet.add(t)))
@@ -520,6 +528,9 @@ export const Sidebar = forwardRef<HTMLElement, Props>(function Sidebar(props, se
           </li>
           <li className={invalidRelationReportCount > 0 ? 'report-summary-warn' : ''}>
             失效关系 <strong>{invalidRelationReportCount}</strong>
+          </li>
+          <li className={relationViolationReportCount > 0 ? 'report-summary-warn' : ''}>
+            超限关系 <strong>{relationViolationReportCount}</strong>
           </li>
         </ul>
         <button
@@ -692,9 +703,12 @@ export const Sidebar = forwardRef<HTMLElement, Props>(function Sidebar(props, se
       <RelationsSection
         annotations={props.annotations}
         views={props.relationViews}
+        cardinalityRules={props.relationCardinalityRules}
+        cardinalityAudit={props.relationCardinalityAudit}
         activeId={props.activeId}
         onCreate={props.onCreateRelation}
         onDelete={props.onDeleteRelation}
+        onSaveCardinalityRules={props.onSaveRelationCardinalityRules}
         onFocus={props.onFocus}
         onRebindStart={props.onRebindStart}
         sectionRef={props.relationsSectionRef}

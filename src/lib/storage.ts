@@ -3,7 +3,7 @@ import { normalizeIgnored, normalizeRules } from './conflicts'
 import { normalizeCoverageTags } from './coverage'
 import { normalizeBaseline, normalizeReviewedDiffs } from './snapshot'
 import { normalizeSampleConfig, normalizeSampleReviews, pruneSampleReviews } from './sampling'
-import { normalizeRelations } from './relations'
+import { normalizeRelationCardinalityRules, normalizeRelations } from './relations'
 
 const STORAGE_KEY = 'anchor-annotation-console:v1'
 
@@ -36,6 +36,10 @@ export function loadDocument(): DocumentData | null {
       ),
       // 旧版本数据没有标注关系：无损补空（有效性在使用时由两端标注派生）
       relations: normalizeRelations(data.relations),
+      // 旧版本数据没有关系基数上限规则：无损补空
+      relationCardinalityRules: normalizeRelationCardinalityRules(
+        data.relationCardinalityRules,
+      ),
       updatedAt: data.updatedAt ?? Date.now(),
     }
   } catch {

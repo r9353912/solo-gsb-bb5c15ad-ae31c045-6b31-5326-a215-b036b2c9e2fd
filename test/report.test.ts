@@ -191,6 +191,7 @@ function baseInput(): ReportInput {
     coverageIssues: 0,
     relationsActive: 0,
     relationsInvalid: 0,
+    relationsCardinalityViolations: 0,
   })
   assert.ok(report.html.includes('原文为空'), '空原文应有提示')
   assert.ok(report.html.includes('没有已绑定标注'))
@@ -232,6 +233,51 @@ function baseInput(): ReportInput {
   const chips = report.html.match(/class="rep-chip"/g) ?? []
   assert.strictEqual(chips.length, 3, '每条非空区间标注在其区间起点有一个序号芯片')
   console.log('  ✓ 多标注叠加与按原文位置编号')
+}
+
+// 8. 关系基数上限审计：超限关系计入统计并在有效关系卡片上标注，失效关系不参与
+{
+  const input = baseInput()
+  // b1 作为源已有 rel1（支撑，t=1）；再补两条 b1 的出边使支撑类型出边达 3 条
+  input.annotations.push(
+    mkAnn({ id: 'b4', quote: text.slice(5, 8), start: 5, end: 8, tags: [] }),
+  )
+  input.relations = [
+    { id: 'rel1', sourceId: 'b1', targetId: 'b2', type: '支撑', createdAt: 1 },
+    { id: 'rel4', sourceId: 'b1', targetId: 'b4', type: '支撑', createdAt: 2 },
+    { id: 'rel5', sourceId: 'b1', targetId: 'b4', type: '引用', createdAt: 3 },
+    // 失效关系（目标待处理）：即使类型相同也不占名额
+    { id: 'rel6', sourceId: 'b1', targetId: 'p1', type: '支撑', createdAt: 4 },
+  ]
+  input.relationCardinalityRules = [
+    { id: 'rcr1', type: '支撑', maxOut: 1, maxIn: null, createdAt: 1 },
+  ]
+  const report = buildReviewReport(input, now)
+  // 支撑有效出边：rel1(t1)、rel4(t2) → rel4 超限；rel6 失效不占名额；引用类型无规则
+  assert.strictEqual(report.stats.relationsCardinalityViolations, 1)
+  assert.strictEqual(report.stats.relationsActive, 3)
+  assert.strictEqual(report.stats.relationsInvalid, 1)
+  const html = report.html
+  assert.ok(html.includes('超限关系'), '汇总应含超限关系统计')
+  assert.ok(html.includes('源端超限'), '应标注超限方向')
+  assert.ok(html.includes('源端出边 2/1'), '应给出出边总数与名额')
+  assert.ok(html.includes('基数上限规则'), '应列出基数规则配置')
+  assert.ok(html.includes('支撑（源端出边 ≤ 1，目标端入边 ≤ 不限）'), '规则应按类型列出上限')
+  // 超限标记只出现在 rel4 的有效关系卡片上（样式表中也有同名选择器，按 class 属性精确匹配）
+  const overItems = html.match(/class="rep-rel rep-rel-over"/g) ?? []
+  assert.strictEqual(overItems.length, 1, '应只有一条关系卡片带超限样式')
+  assert.ok(!html.includes('目标端超限'), '未配置入边上限时不应出现目标端超限')
+  console.log('  ✓ 关系基数上限：超限统计、方向与名额标注、失效关系不参与')
+}
+
+// 9. 旧版调用方缺省 relationCardinalityRules：按空规则处理（不审计）
+{
+  const input = baseInput()
+  delete (input as { relationCardinalityRules?: unknown }).relationCardinalityRules
+  const report = buildReviewReport(input, now)
+  assert.strictEqual(report.stats.relationsCardinalityViolations, 0)
+  assert.ok(!report.html.includes('基数上限规则：'), '未配置规则时不渲染规则清单')
+  console.log('  ✓ 缺省基数规则字段按空规则兼容')
 }
 
 console.log('\n审阅报告生成测试全部通过')

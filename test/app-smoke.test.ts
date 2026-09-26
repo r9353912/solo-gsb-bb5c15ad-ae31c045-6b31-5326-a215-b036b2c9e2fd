@@ -1724,6 +1724,331 @@ console.log('  ✓ 冲突审阅面板（含忽略折叠与交叠高亮）渲染�
   console.log('  ✓ 标注关系：建立/禁自关联/禁重复、类型筛选、定位、待处理失效与恢复、删除失效、持久化')
 }
 
+// 关系基数上限审计：规则随存档加载 → 源端/目标端超限实时标出 → 筛选 → 只提示不阻止建立 → 删除重算
+{
+  const capText = '零一二三四五六七八九'
+  const mk = (id: string, start: number, end: number, tags: string[] = []) => ({
+    id,
+    quote: capText.slice(start, end),
+    start,
+    end,
+    note: '',
+    tags,
+    status: 'bound' as const,
+    createdAt: 1,
+    updatedAt: 1,
+    contextBefore: '',
+    contextAfter: '',
+  })
+  const capDoc = {
+    title: '基数文档',
+    text: capText,
+    updatedAt: Date.now(),
+    annotations: [
+      mk('cap_a', 0, 2, ['论点']),
+      mk('cap_b', 3, 5, ['论据']),
+      mk('cap_c', 6, 8),
+      mk('cap_d', 8, 9),
+      mk('cap_e', 9, 10),
+    ],
+    // 支撑：源端出边 ≤2、目标端入边 ≤1
+    relationCardinalityRules: [
+      { id: 'cap_r1', type: '支撑', maxOut: 2, maxIn: 1, createdAt: 100 },
+    ],
+    relations: [
+      { id: 'cap_rel1', sourceId: 'cap_a', targetId: 'cap_b', type: '支撑', createdAt: 10 },
+      { id: 'cap_rel2', sourceId: 'cap_a', targetId: 'cap_c', type: '支撑', createdAt: 20 },
+      { id: 'cap_rel3', sourceId: 'cap_a', targetId: 'cap_d', type: '支撑', createdAt: 30 },
+      { id: 'cap_rel4', sourceId: 'cap_d', targetId: 'cap_c', type: '支撑', createdAt: 40 },
+      // 另一种类型无规则，不参与审计
+      { id: 'cap_rel5', sourceId: 'cap_a', targetId: 'cap_b', type: '反驳', createdAt: 50 },
+    ],
+  }
+  // a 的支撑出边 rel1(t10) rel2(t20) rel3(t30)：rel3 源端超限
+  // c 的支撑入边 rel2(t20) rel4(t40)：rel4 目标端超限 → 共 2 条违规
+  localStorage.setItem('anchor-annotation-console:v1', JSON.stringify(capDoc))
+  const gc = document.createElement('div')
+  gc.id = 'rootcap'
+  document.body.appendChild(gc)
+  const gr = createRoot(gc)
+
+  await new Promise<void>((resolve) => {
+    gr.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 400)
+  })
+
+  const section = () => gc.querySelector('.relations-section') as HTMLElement
+  const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 150))
+
+  // 规则编辑器回显已保存规则（折叠区在 DOM 中；输入值不在 textContent 里，按 value 校验）
+  const editor = gc.querySelector('.rel-cap-editor') as HTMLElement
+  assert.ok(editor, '应渲染基数上限规则编辑器')
+  assert.ok(
+    (editor.querySelector('.rel-cap-type') as HTMLInputElement).value === '支撑',
+    '规则类型输入框应回显',
+  )
+  const capNums = () => [...editor.querySelectorAll('.rel-cap-num')] as HTMLInputElement[]
+  assert.deepStrictEqual(
+    capNums().map((el) => el.value),
+    ['2', '1'],
+    '两个上限输入框应回显 2 / 1',
+  )
+
+  // 超限标记：rel3 源端超限、rel4 目标端超限
+  assert.ok(gc.innerHTML.includes('源端超限'), '应标出源端超限')
+  assert.ok(gc.innerHTML.includes('目标端超限'), '应标出目标端超限')
+  assert.ok(gc.innerHTML.includes('源端出边 3/2'), '源端标记应给出实际/名额')
+  assert.ok(gc.innerHTML.includes('目标端入边 2/1'), '目标端标记应给出实际/名额')
+  // 反驳类型无规则，不标超限
+  const overCards = () => [...section()!.querySelectorAll('.rel-item.rel-item-over')]
+  assert.strictEqual(overCards().length, 2, '应有 2 张超限关系卡片')
+  // 标题红色计数徽章、汇总行「超限 2 条」、页脚与顶栏计数
+  assert.ok(section()!.querySelector('.rel-cap-badge'), '分区标题应有超限计数徽章')
+  assert.ok(/超限\s*2\s*条/.test(section()!.textContent!), '汇总行应显示超限 2 条')
+  assert.ok(gc.innerHTML.includes('2 条关系超限'), '页脚应显示超限数量')
+
+  // 超限筛选芯片：点击后只显示 2 张有效卡片
+  const overFilter = [...section()!.querySelectorAll('.rel-filter')].find((b) =>
+    b.textContent?.trim().startsWith('超限'),
+  ) as HTMLButtonElement
+  assert.ok(overFilter, '应出现「超限」筛选芯片')
+  overFilter.click()
+  await wait()
+  assert.strictEqual(
+    section()!.querySelectorAll('.rel-item.rel-item-over').length,
+    2,
+    '超限筛选下只显示超限关系',
+  )
+  // 切回全部
+  ;([...section()!.querySelectorAll('.rel-filter')].find((b) =>
+    b.textContent?.trim().startsWith('全部'),
+  ) as HTMLButtonElement).click()
+  await wait()
+  assert.strictEqual(section()!.querySelectorAll('.rel-item').length, 5)
+
+  // 超限关系卡片的端点仍可点击定位原文（onFocus 路径不变）
+  const firstOver = overCards()[0]!.querySelector('.rel-end') as HTMLButtonElement
+  firstOver.click()
+  await wait()
+  assert.ok(
+    overCards().some((c) => c.querySelector('.rel-end-active')),
+    '点击超限关系端点后应高亮定位',
+  )
+
+  // 审计只提示，不阻止建立关系：再建一条 cap_a→cap_e「支撑」（a 已有 3 条支撑出边、且非重复）
+  const setNativeValue = (el: HTMLInputElement | HTMLSelectElement, v: string) => {
+    const proto =
+      el instanceof window.HTMLSelectElement
+        ? window.HTMLSelectElement.prototype
+        : window.HTMLInputElement.prototype
+    Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(el, v)
+    el.dispatchEvent(new window.Event('input', { bubbles: true }))
+    el.dispatchEvent(new window.Event('change', { bubbles: true }))
+  }
+  const createSelects = () =>
+    [...section()!.querySelectorAll('.rel-create .rel-select')] as HTMLSelectElement[]
+  setNativeValue(createSelects()[0]!, 'cap_a')
+  setNativeValue(createSelects()[1]!, 'cap_e')
+  setNativeValue(section()!.querySelector('.rel-create .rel-type-input') as HTMLInputElement, '支撑')
+  await wait()
+  const createBtn = [...section()!.querySelectorAll('.rel-create button')].find(
+    (b) => b.textContent?.trim() === '建立关系',
+  ) as HTMLButtonElement
+  assert.ok(!createBtn.disabled, '超限不是重复 / 自关联，建立按钮不应被禁用')
+  createBtn.click()
+  await wait()
+  const persisted = JSON.parse(localStorage.getItem('anchor-annotation-console:v1')!)
+  assert.strictEqual(persisted.relations.length, 6, '审计不阻止建立：新关系已持久化')
+  // 新关系创建时间最新 → a 的支撑出边 4 条，它成为第 3 个源端超限项
+  assert.strictEqual(
+    section()!.querySelectorAll('.rel-item.rel-item-over').length,
+    3,
+    '建立后实时重算：新关系（出边第 4 条）也标记超限',
+  )
+
+  // 删除一条源端超限关系（rel3）→ a 出边回到 3 条（名额 2，仍有 1 条超限：新建那条）
+  const cardRel3 = [...section()!.querySelectorAll('.rel-item')].find((el) =>
+    el.querySelector('.rel-type-pill')?.textContent === '支撑' &&
+    [...el.querySelectorAll('.rel-end-pos')].some((p) => p.textContent === '[8,9)'),
+  ) as HTMLElement
+  ;(globalThis as unknown as { confirm: () => boolean }).confirm = () => true
+  window.confirm = () => true
+  ;([...cardRel3.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === '删除关系',
+  ) as HTMLButtonElement).click()
+  await wait()
+  assert.strictEqual(
+    JSON.parse(localStorage.getItem('anchor-annotation-console:v1')!).relations.length,
+    5,
+  )
+  assert.strictEqual(
+    section()!.querySelectorAll('.rel-item.rel-item-over').length,
+    2,
+    '删除关系后实时重算：源端超限项随最新出边数减少',
+  )
+
+  // 规则随本地存档保存
+  const saved = JSON.parse(localStorage.getItem('anchor-annotation-console:v1')!)
+  assert.ok(Array.isArray(saved.relationCardinalityRules))
+  assert.deepStrictEqual(
+    saved.relationCardinalityRules.map((r: { type: string }) => r.type),
+    ['支撑'],
+  )
+
+  gr.unmount()
+  gc.remove()
+  console.log('  ✓ 关系基数上限审计：规则加载回显、源端/目标端超限标记、筛选、端点定位、只提示不阻止、删除实时重算与持久化')
+}
+
+// 关系基数上限规则：UI 新建规则并保存；失效恢复后违规自动重新出现；导入旧文件按空规则兼容
+{
+  const recText = '零一二三四五六七八九'
+  const mk = (id: string, start: number, end: number) => ({
+    id,
+    quote: recText.slice(start, end),
+    start,
+    end,
+    note: '',
+    tags: [],
+    status: 'bound' as const,
+    createdAt: 1,
+    updatedAt: 1,
+    contextBefore: '',
+    contextAfter: '',
+  })
+  const recDoc = {
+    title: '基数恢复文档',
+    text: recText,
+    updatedAt: Date.now(),
+    annotations: [
+      mk('rec_a', 0, 2),
+      mk('rec_b', 3, 5),
+      mk('rec_c', 6, 8),
+    ],
+    relations: [
+      { id: 'rec_r1', sourceId: 'rec_a', targetId: 'rec_b', type: '支撑', createdAt: 10 },
+      { id: 'rec_r2', sourceId: 'rec_a', targetId: 'rec_c', type: '支撑', createdAt: 20 },
+    ],
+  }
+  localStorage.setItem('anchor-annotation-console:v1', JSON.stringify(recDoc))
+  const hc = document.createElement('div')
+  hc.id = 'rootcaprec'
+  document.body.appendChild(hc)
+  const hr = createRoot(hc)
+
+  await new Promise<void>((resolve) => {
+    hr.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 400)
+  })
+
+  const section = () => hc.querySelector('.relations-section') as HTMLElement
+  const editor = () => hc.querySelector('.rel-cap-editor') as HTMLElement
+  const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 150))
+  const setNativeInput = (el: HTMLInputElement, v: string) => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!.call(el, v)
+    el.dispatchEvent(new window.Event('input', { bubbles: true }))
+  }
+
+  // 初始无规则 → 无超限标记
+  assert.strictEqual(section()!.querySelectorAll('.rel-item-over').length, 0)
+
+  // 打开规则折叠区 → 添加规则：类型「支撑」、源出边 1，保存
+  const summaryEl = editor()!.querySelector('summary') as HTMLElement
+  summaryEl.click()
+  await wait()
+  ;([...editor()!.querySelectorAll('button')].find((b) =>
+    b.textContent?.trim().startsWith('+ 添加规则'),
+  ) as HTMLButtonElement).click()
+  await wait()
+  setNativeInput(editor()!.querySelector('.rel-cap-type') as HTMLInputElement, '支撑')
+  const nums = () => [...editor()!.querySelectorAll('.rel-cap-num')] as HTMLInputElement[]
+  setNativeInput(nums()[0]!, '1') // 源出边
+  await wait()
+  const saveBtn = [...editor()!.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === '保存规则',
+  ) as HTMLButtonElement
+  assert.ok(!saveBtn.disabled, '合法规则应可保存')
+  saveBtn.click()
+  await wait()
+  const saved1 = JSON.parse(localStorage.getItem('anchor-annotation-console:v1')!)
+  assert.strictEqual(saved1.relationCardinalityRules.length, 1)
+  assert.deepStrictEqual(
+    [
+      saved1.relationCardinalityRules[0].type,
+      saved1.relationCardinalityRules[0].maxOut,
+      saved1.relationCardinalityRules[0].maxIn,
+    ],
+    ['支撑', 1, null],
+    '留空的目标端名额应为 null（不限）',
+  )
+  // rec_a 的第 2 条出边 rec_r2 实时标为源端超限
+  assert.ok(hc.innerHTML.includes('源端超限'), '保存规则后应实时重算并标出超限')
+
+  // 非法输入（0 / 非数字）阻止保存
+  summaryEl.click()
+  await wait()
+  setNativeInput(nums()[0]!, '0')
+  await wait()
+  assert.ok(editor()!.textContent!.includes('≥1 的整数'), '非法上限应给出校验提示')
+  const saveBtn2 = [...editor()!.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === '保存规则',
+  ) as HTMLButtonElement
+  assert.ok(saveBtn2.disabled, '存在非法上限时保存应禁用')
+  setNativeInput(nums()[0]!, '1')
+  await wait()
+
+  // 失效 → 恢复：把源标注 rec_a 置为 pending，两条关系失效 → 违规消失；重新绑定后违规复现
+  {
+    const d = JSON.parse(localStorage.getItem('anchor-annotation-console:v1')!)
+    const a = d.annotations.find((x: { id: string }) => x.id === 'rec_a')
+    a.status = 'pending'
+    a.pendingReason = '原文中已找不到该引文，需要手动重新选择'
+    a.start = 0
+    a.end = 0
+    d.updatedAt = Date.now()
+    localStorage.setItem('anchor-annotation-console:v1', JSON.stringify(d))
+  }
+  hr.unmount()
+  const hc2 = document.createElement('div')
+  hc2.id = 'rootcaprec2'
+  document.body.appendChild(hc2)
+  const hr2 = createRoot(hc2)
+  await new Promise<void>((resolve) => {
+    hr2.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 400)
+  })
+  assert.ok(
+    !hc2.innerHTML.includes('源端超限'),
+    '源标注待处理导致关系失效后，违规应自动消失（只统计有效关系）',
+  )
+  {
+    const d = JSON.parse(localStorage.getItem('anchor-annotation-console:v1')!)
+    const a = d.annotations.find((x: { id: string }) => x.id === 'rec_a')
+    a.status = 'bound'
+    a.start = 0
+    a.end = 2
+    a.pendingReason = undefined
+    d.updatedAt = Date.now()
+    localStorage.setItem('anchor-annotation-console:v1', JSON.stringify(d))
+  }
+  hr2.unmount()
+  const hc3 = document.createElement('div')
+  hc3.id = 'rootcaprec3'
+  document.body.appendChild(hc3)
+  const hr3 = createRoot(hc3)
+  await new Promise<void>((resolve) => {
+    hr3.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 400)
+  })
+  assert.ok(hc3.innerHTML.includes('源端超限'), '待处理端重新绑定后关系恢复有效，违规自动重新出现')
+
+  hr3.unmount()
+  hc.remove()
+  hc2.remove()
+  hc3.remove()
+  console.log('  ✓ 基数规则 UI 保存（留空即不限）、非法上限拦截、失效后违规消失与恢复后重新出现')
+}
+
 // 旧版数据（无 conflictRules / ignoredConflicts 字段）应无损加载
 const legacy = {
   title: '旧文档',
@@ -1759,8 +2084,11 @@ assert.ok(Array.isArray(reparsed.reviewedDiffs) && reparsed.reviewedDiffs.length
 assert.strictEqual(reparsed.sampleConfig, null)
 assert.ok(Array.isArray(reparsed.sampleReviews) && reparsed.sampleReviews.length === 0)
 assert.ok(Array.isArray(reparsed.relations) && reparsed.relations.length === 0)
+assert.ok(
+  Array.isArray(reparsed.relationCardinalityRules) && reparsed.relationCardinalityRules.length === 0,
+)
 assert.strictEqual(reparsed.text, '一二三四五六')
-console.log('  ✓ 旧数据无损兼容并自动补齐冲突字段与标注关系空数组')
+console.log('  ✓ 旧数据无损兼容并自动补齐冲突字段、标注关系与基数规则空数组')
 
 root4.unmount()
 container4.remove()

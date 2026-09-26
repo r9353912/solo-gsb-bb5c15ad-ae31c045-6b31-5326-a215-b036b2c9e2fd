@@ -15,6 +15,7 @@ import type {
   AnnotationRelation,
   ConflictRule,
   IgnoredConflict,
+  RelationCardinalityRule,
 } from '../types'
 import {
   badgeColor,
@@ -28,8 +29,10 @@ import {
 } from './conflicts'
 import { auditCoverage } from './coverage'
 import {
+  auditRelationCardinality,
   buildRelationViews,
   relationStats,
+  RELATION_CARDINALITY_VIOLATION_LABEL,
   RELATION_INVALID_REASON_LABEL,
   sortRelationViews,
 } from './relations'
@@ -43,6 +46,8 @@ export interface ReportInput {
   coverageTags: string[]
   /** 标注之间的有向关系（旧版调用方缺省时按空数组处理） */
   relations?: AnnotationRelation[]
+  /** 关系基数上限规则（旧版调用方缺省时按空数组处理：不审计） */
+  relationCardinalityRules?: RelationCardinalityRule[]
 }
 
 export interface ReportStats {
@@ -58,6 +63,8 @@ export interface ReportStats {
   relationsActive: number
   /** 失效关系数（任一端被删除或进入待处理） */
   relationsInvalid: number
+  /** 基数超限关系数（仅统计有效关系；未配置规则时为 0） */
+  relationsCardinalityViolations: number
 }
 
 export interface ReviewReport {
@@ -146,6 +153,9 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
   const relations = input.relations ?? []
   const relationViews = sortRelationViews(buildRelationViews(relations, annotations))
   const relStats = relationStats(relationViews)
+  // 基数上限审计：仅统计有效关系，同一端点同类型按（创建时间, 关系 ID）排序取前 N 条合规
+  const cardinalityRules = input.relationCardinalityRules ?? []
+  const cardinalityAudit = auditRelationCardinality(relationViews, cardinalityRules)
 
   const pendingAnnotations = annotations
     .filter((a) => a.status === 'pending')
@@ -181,6 +191,7 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
     coverageIssues: coverage.gapCount + coverage.overlapCount,
     relationsActive: relStats.active,
     relationsInvalid: relStats.invalid,
+    relationsCardinalityViolations: cardinalityAudit.violationCount,
   }
 
   // ---------- 原文（按位置渲染高亮 / 冲突 / 覆盖问题） ----------
@@ -384,14 +395,28 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
       : `<p class="rep-rel-reason">已失效：${
           v.invalidReason ? escapeHtml(RELATION_INVALID_REASON_LABEL[v.invalidReason]) : ''
         }</p>`
+    // 有效关系上的基数超限标记（仅提示，不改变有效性）
+    const cap = v.active ? cardinalityAudit.byRelationId.get(v.relation.id) ?? null : null
+    const capParts: string[] = []
+    if (cap && cap.sourceLimit !== null) {
+      capParts.push(`源端出边 ${cap.sourceCount}/${cap.sourceLimit}`)
+    }
+    if (cap && cap.targetLimit !== null) {
+      capParts.push(`目标端入边 ${cap.targetCount}/${cap.targetLimit}`)
+    }
+    const capFlag = cap
+      ? `<p class="rep-rel-cap">${escapeHtml(RELATION_CARDINALITY_VIOLATION_LABEL[cap.kind])}` +
+        `：${escapeHtml(capParts.join('；'))}</p>`
+      : ''
     return (
-      `<li id="relation-${section}-${i + 1}" class="${cls}">` +
+      `<li id="relation-${section}-${i + 1}" class="${cls}${cap ? ' rep-rel-over' : ''}">` +
       `<div class="rep-rel-type"><span class="rep-rel-type-pill">${escapeHtml(v.relation.type)}</span></div>` +
       `<div class="rep-rel-sides">` +
       relationEnd('源', v.source, '源标注已删除') +
       `<div class="rep-rel-arrow">→</div>` +
       relationEnd('目标', v.target, '目标标注已删除') +
       `</div>` +
+      capFlag +
       state +
       `</li>`
     )
@@ -411,6 +436,16 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
   const coverageConfigNote = input.coverageTags.length > 0
     ? `覆盖审计标签：${input.coverageTags.map((t) => escapeHtml(t)).join('、')}`
     : '尚未配置覆盖审计标签（覆盖问题数始终为 0）'
+  const cardinalityConfigNote = cardinalityRules.length > 0
+    ? cardinalityRules
+        .map(
+          (r) =>
+            `${escapeHtml(r.type)}（源端出边 ≤ ${r.maxOut ?? '不限'}，目标端入边 ≤ ${
+              r.maxIn ?? '不限'
+            }）`,
+        )
+        .join('；')
+    : ''
 
   const html = `<!doctype html>
 <html lang="zh-CN">
@@ -437,8 +472,9 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
       <li class="rep-stat${stats.coverageIssues > 0 ? ' rep-stat-warn' : ''}"><span class="rep-stat-num">${stats.coverageIssues}</span><span class="rep-stat-label">覆盖问题</span></li>
       <li class="rep-stat"><span class="rep-stat-num">${stats.relationsActive}</span><span class="rep-stat-label">有效关系</span></li>
       <li class="rep-stat${stats.relationsInvalid > 0 ? ' rep-stat-warn' : ''}"><span class="rep-stat-num">${stats.relationsInvalid}</span><span class="rep-stat-label">失效关系</span></li>
+      <li class="rep-stat${stats.relationsCardinalityViolations > 0 ? ' rep-stat-warn' : ''}"><span class="rep-stat-num">${stats.relationsCardinalityViolations}</span><span class="rep-stat-label">超限关系</span></li>
     </ul>
-    <p class="rep-meta">冲突仅统计未忽略项${ignoredConflictCount > 0 ? `（另有 ${ignoredConflictCount} 条已忽略）` : ''}；覆盖问题为缺口与重叠之和。有效关系要求两端标注均存在且已绑定；任一端删除或待处理即计入失效关系。</p>
+    <p class="rep-meta">冲突仅统计未忽略项${ignoredConflictCount > 0 ? `（另有 ${ignoredConflictCount} 条已忽略）` : ''}；覆盖问题为缺口与重叠之和。有效关系要求两端标注均存在且已绑定；任一端删除或待处理即计入失效关系。超限关系为超出基数上限规则名额的<strong>有效关系</strong>（同一端点同类型按创建时间、再按关系 ID 排序），仅提示，不影响有效性。</p>
   </section>
 
   <section class="rep-section">
@@ -485,6 +521,11 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
 
   <section class="rep-section">
     <h2>标注关系 · 有效（${activeRelationViews.length}）</h2>
+    ${
+      cardinalityRules.length > 0
+        ? `<p class="rep-meta">基数上限规则：${cardinalityConfigNote}。仅统计有效关系，同一端点同一类型按创建时间（再按关系 ID）排序，超出名额的关系标注为<strong>超限</strong>（仅提示，不影响关系有效性）。</p>`
+        : ''
+    }
     ${
       activeRelationViews.length === 0
         ? '<p class="rep-muted">没有有效关系。</p>'
@@ -647,6 +688,11 @@ body {
 .rep-rel-state-pending { background: #fff7e6; color: #b26a00; }
 .rep-rel-state-missing { background: #fdecea; color: #b3261e; }
 .rep-rel-reason { margin: 8px 0 2px; color: #9a6b00; font-size: 13px; }
+.rep-rel-over { border-color: #e8a3a0; background: #fef7f6; }
+.rep-rel-cap {
+  margin: 8px 0 2px; color: #b3261e; font-size: 13px;
+  background: #fdecea; border-radius: 6px; padding: 4px 8px;
+}
 .rep-rel-side .rep-quote { margin: 6px 0; }
 .rep-footer { color: #9ca3af; font-size: 12.5px; text-align: center; margin-top: 24px; }
 @media print {

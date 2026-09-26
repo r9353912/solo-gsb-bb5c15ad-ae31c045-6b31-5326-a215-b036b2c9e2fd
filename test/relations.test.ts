@@ -1,15 +1,19 @@
 import assert from 'node:assert'
 import {
+  auditRelationCardinality,
   buildRelationViews,
   isSelfRelation,
+  normalizeCardinalityLimit,
+  normalizeRelationCardinalityRules,
   normalizeRelations,
   relationKey,
   relationStats,
   relationTypeFilters,
   sortRelationViews,
+  RELATION_CARDINALITY_VIOLATION_LABEL,
   RELATION_INVALID_REASON_LABEL,
 } from '../src/lib/relations'
-import type { Annotation, AnnotationRelation } from '../src/types'
+import type { Annotation, AnnotationRelation, RelationCardinalityRule } from '../src/types'
 
 let passed = 0
 function check(name: string, fn: () => void) {
@@ -193,6 +197,240 @@ check('全部失效原因都有中文标签', () => {
   ] as const) {
     assert.ok(RELATION_INVALID_REASON_LABEL[reason].length > 0)
   }
+})
+
+// 8. 基数上限值清洗
+check('上限清洗：仅 ≥1 的有限整数保留，其余按 null（不限）；小数向下取整', () => {
+  assert.strictEqual(normalizeCardinalityLimit(1), 1)
+  assert.strictEqual(normalizeCardinalityLimit(3), 3)
+  assert.strictEqual(normalizeCardinalityLimit(2.9), 2)
+  assert.strictEqual(normalizeCardinalityLimit('5'), 5)
+  assert.strictEqual(normalizeCardinalityLimit(' 7 '), 7)
+  assert.strictEqual(normalizeCardinalityLimit(0), null)
+  assert.strictEqual(normalizeCardinalityLimit(-2), null)
+  assert.strictEqual(normalizeCardinalityLimit('abc'), null)
+  assert.strictEqual(normalizeCardinalityLimit(''), null)
+  assert.strictEqual(normalizeCardinalityLimit(null), null)
+  assert.strictEqual(normalizeCardinalityLimit(undefined), null)
+  assert.strictEqual(normalizeCardinalityLimit(Infinity), null)
+})
+
+// 9. 基数规则清洗
+check('基数规则清洗：非数组 / 旧版缺省按空', () => {
+  assert.deepStrictEqual(normalizeRelationCardinalityRules(undefined), [])
+  assert.deepStrictEqual(normalizeRelationCardinalityRules(null), [])
+  assert.deepStrictEqual(normalizeRelationCardinalityRules('x'), [])
+})
+
+check('基数规则清洗：空类型、两侧均不限丢弃；非法上限按不限；同类型保留第一条', () => {
+  const out = normalizeRelationCardinalityRules([
+    { id: 'c1', type: ' 支撑 ', maxOut: 2, maxIn: 1, createdAt: 10 },
+    { id: 'c2', type: '', maxOut: 1, maxIn: 1 },
+    { id: 'c3', type: '反驳', maxOut: null, maxIn: null },
+    { id: 'c4', type: '引用', maxOut: 0, maxIn: -3 },
+    { id: 'c5', type: '引用', maxOut: '3', maxIn: '2.9', createdAt: '2026-09-18T00:00:00.000Z' },
+    { id: 'c6', type: '支撑', maxOut: 9, maxIn: 9 }, // 同类型重复 → 丢弃
+    { id: 'c7', type: '属于 论据', maxOut: 4, maxIn: null },
+    null,
+  ])
+  assert.deepStrictEqual(
+    out.map((r) => [r.type, r.maxOut, r.maxIn]),
+    [
+      ['支撑', 2, 1],
+      ['引用', 3, 2],
+      ['属于 论据', 4, null],
+    ],
+  )
+  assert.strictEqual(out[0].id, 'c1', '已保存规则沿用稳定 ID')
+  assert.strictEqual(out[1].createdAt, Date.parse('2026-09-18T00:00:00.000Z'))
+})
+
+// 10. 审计：无规则 / 无有效关系
+check('审计：未配置规则时 configured=false 且无违规', () => {
+  const ans = [ann('a'), ann('b')]
+  const audit = auditRelationCardinality(buildRelationViews([rel('a', 'b')], ans), [])
+  assert.strictEqual(audit.configured, false)
+  assert.strictEqual(audit.violationCount, 0)
+  assert.deepStrictEqual(audit.violations, [])
+})
+
+check('审计：配置了规则但当前无有效关系（仅失效）→ configured=true 且无违规', () => {
+  const ans = [ann('a', 'pending'), ann('b')]
+  const views = buildRelationViews([rel('a', 'b')], ans)
+  const rules: RelationCardinalityRule[] = [
+    { id: 'r1', type: '支撑', maxOut: 1, maxIn: 1, createdAt: 1 },
+  ]
+  const audit = auditRelationCardinality(views, rules)
+  assert.strictEqual(audit.configured, true)
+  assert.strictEqual(audit.violationCount, 0)
+})
+
+// 11. 审计：源端出边 / 目标端入边超限，按创建时间保留较早的名额
+check('审计：源端 maxOut=2 → 第 3 条（创建最晚）源端超限；其余合规', () => {
+  const ans = [ann('a'), ann('b'), ann('c'), ann('d')]
+  const rules: RelationCardinalityRule[] = [
+    { id: 'r1', type: '支撑', maxOut: 2, maxIn: null, createdAt: 1 },
+  ]
+  const views = buildRelationViews(
+    [
+      rel('a', 'b', '支撑', 10, 'r_ab'),
+      rel('a', 'c', '支撑', 30, 'r_ac'),
+      rel('a', 'd', '支撑', 20, 'r_ad'),
+    ],
+    ans,
+  )
+  const audit = auditRelationCardinality(views, rules)
+  assert.strictEqual(audit.violationCount, 1)
+  const v = audit.violations[0]!
+  assert.strictEqual(v.relationId, 'r_ac', '创建时间最晚的关系超限')
+  assert.strictEqual(v.kind, 'source')
+  assert.strictEqual(v.sourceCount, 3)
+  assert.strictEqual(v.sourceLimit, 2)
+  assert.strictEqual(v.targetCount, null)
+  assert.strictEqual(v.targetLimit, null)
+  assert.strictEqual(audit.byRelationId.get('r_ac'), v)
+  assert.strictEqual(audit.byRelationId.has('r_ab'), false)
+})
+
+check('审计：目标端 maxIn=1 → 同目标的第 2 条入边目标端超限', () => {
+  const ans = [ann('a'), ann('b'), ann('c')]
+  const rules: RelationCardinalityRule[] = [
+    { id: 'r1', type: '支撑', maxOut: null, maxIn: 1, createdAt: 1 },
+  ]
+  const views = buildRelationViews(
+    [
+      rel('b', 'c', '支撑', 20, 'r_bc'),
+      rel('a', 'c', '支撑', 10, 'r_ac'),
+    ],
+    ans,
+  )
+  const audit = auditRelationCardinality(views, rules)
+  assert.strictEqual(audit.violationCount, 1)
+  const v = audit.violations[0]!
+  assert.strictEqual(v.relationId, 'r_bc')
+  assert.strictEqual(v.kind, 'target')
+  assert.strictEqual(v.targetCount, 2)
+  assert.strictEqual(v.targetLimit, 1)
+  assert.strictEqual(v.sourceCount, null)
+})
+
+// 12. 同一关系两端兼有
+check('审计：同一条关系同时超出源端与目标端名额 → kind=both 且两端计数齐全', () => {
+  const ans = [ann('a'), ann('b'), ann('c'), ann('d')]
+  const rules: RelationCardinalityRule[] = [
+    { id: 'r1', type: '引用', maxOut: 1, maxIn: 1, createdAt: 1 },
+  ]
+  const views = buildRelationViews(
+    [
+      rel('d', 'c', '引用', 5, 'r_dc'), // c 的第 1 条入边（占名额）
+      rel('a', 'b', '引用', 10, 'r_ab'), // a 的第 1 条出边（占名额）
+      rel('a', 'c', '引用', 20, 'r_ac'), // a 的第 2 条出边 + c 的第 2 条入边 → both
+    ],
+    ans,
+  )
+  const audit = auditRelationCardinality(views, rules)
+  assert.strictEqual(audit.violationCount, 1)
+  const v = audit.violations[0]!
+  assert.strictEqual(v.relationId, 'r_ac')
+  assert.strictEqual(v.kind, 'both')
+  assert.strictEqual(v.sourceCount, 2)
+  assert.strictEqual(v.sourceLimit, 1)
+  assert.strictEqual(v.targetCount, 2)
+  assert.strictEqual(v.targetLimit, 1)
+})
+
+// 13. 稳定排序：创建时间相同时按关系 ID 决胜
+check('审计：创建时间相同 → 关系 ID 字典序靠后者超限', () => {
+  const ans = [ann('a'), ann('b'), ann('c')]
+  const rules: RelationCardinalityRule[] = [
+    { id: 'r1', type: '支撑', maxOut: 1, maxIn: null, createdAt: 1 },
+  ]
+  const views = buildRelationViews(
+    [
+      rel('a', 'b', '支撑', 10, 'rel_z'),
+      rel('a', 'c', '支撑', 10, 'rel_a'),
+    ],
+    ans,
+  )
+  const audit = auditRelationCardinality(views, rules)
+  assert.deepStrictEqual(audit.violations.map((v) => v.relationId), ['rel_z'])
+})
+
+check('审计：违规列表按创建时间、再按关系 ID 稳定排序', () => {
+  const ans = [ann('a'), ann('b'), ann('c'), ann('d'), ann('e')]
+  const rules: RelationCardinalityRule[] = [
+    { id: 'r1', type: '支撑', maxOut: 1, maxIn: null, createdAt: 1 },
+  ]
+  const views = buildRelationViews(
+    [
+      rel('a', 'b', '支撑', 30, 'v3'),
+      rel('a', 'c', '支撑', 10, 'v1'),
+      rel('d', 'e', '支撑', 20, 'v2'),
+      rel('d', 'b', '支撑', 10, 'v1b'),
+    ],
+    ans,
+  )
+  // a 的出边：v1(t10) 合规、v3(t30) 超限；d 的出边：v1b(t10,id=v1b) 合规、v2(t20) 超限
+  const audit = auditRelationCardinality(views, rules)
+  assert.deepStrictEqual(
+    audit.violations.map((v) => v.relationId),
+    ['v2', 'v3'],
+  )
+})
+
+// 14. 类型隔离 / 失效不占名额 / 仅配置一侧
+check('审计：不同类型互不影响；失效关系不占用名额', () => {
+  const ans = [ann('a'), ann('b'), ann('c', 'pending')]
+  const rules: RelationCardinalityRule[] = [
+    { id: 'r1', type: '支撑', maxOut: 1, maxIn: 1, createdAt: 1 },
+  ]
+  const views = buildRelationViews(
+    [
+      rel('a', 'b', '支撑', 1, 'ok1'), // 占 a 出边 / b 入边名额
+      rel('a', 'c', '支撑', 2, 'bad_pending'), // 目标待处理 → 失效，不占 a 的出边名额
+      rel('a', 'b', '反驳', 3, 'other_type'), // 不同类型，即使完全重复也不参与
+    ],
+    ans,
+  )
+  const audit = auditRelationCardinality(views, rules)
+  assert.strictEqual(audit.violationCount, 0)
+})
+
+check('审计：只配一侧时另一侧不受限制', () => {
+  const ans = [ann('a'), ann('b'), ann('c'), ann('d')]
+  const rules: RelationCardinalityRule[] = [
+    { id: 'r1', type: '支撑', maxOut: 1, maxIn: null, createdAt: 1 },
+  ]
+  const views = buildRelationViews(
+    [
+      rel('a', 'b', '支撑', 1, 'x1'),
+      rel('c', 'b', '支撑', 2, 'x2'),
+      rel('d', 'b', '支撑', 3, 'x3'),
+    ],
+    ans,
+  )
+  // b 有 3 条入边但未配 maxIn → 全部合规；a/c/d 各自只有 1 条出边 → 无违规
+  assert.strictEqual(auditRelationCardinality(views, rules).violationCount, 0)
+})
+
+check('审计：超限方向标签齐全', () => {
+  for (const kind of ['source', 'target', 'both'] as const) {
+    assert.ok(RELATION_CARDINALITY_VIOLATION_LABEL[kind].length > 0)
+  }
+})
+
+check('审计：不修改输入的关系视图与规则', () => {
+  const ans = [ann('a'), ann('b'), ann('c')]
+  const views = buildRelationViews(
+    [rel('a', 'b', '支撑', 1, 'x1'), rel('a', 'c', '支撑', 2, 'x2')],
+    ans,
+  )
+  const rules: RelationCardinalityRule[] = [
+    { id: 'r1', type: '支撑', maxOut: 1, maxIn: 1, createdAt: 1 },
+  ]
+  const snapshot = JSON.stringify({ views, rules })
+  auditRelationCardinality(views, rules)
+  assert.strictEqual(JSON.stringify({ views, rules }), snapshot)
 })
 
 console.log(`\n标注关系逻辑测试全部通过（${passed} 项）`)

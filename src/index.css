@@ -2651,3 +2651,124 @@ button.rel-end:hover {
 .rel-invalid-fold[open] summary {
   margin-bottom: 6px;
 }
+
+/* ---------- 关系基数上限审计 ---------- */
+
+.rel-cap-badge {
+  background: #c0392b;
+}
+
+.rel-summary-over {
+  color: #c0392b;
+}
+
+.rel-filter-over {
+  border-color: #f0b8b4;
+  color: #c0392b;
+  font-weight: 600;
+}
+
+.rel-filter-over:hover {
+  border-color: #e8a3a0;
+}
+
+.rel-filter-over.rel-filter-on {
+  background: #fdecea;
+  border-color: #e8a3a0;
+  color: #c0392b;
+}
+
+.rel-item-over {
+  border-color: #e8a3a0;
+  background: #fef7f6;
+}
+
+.rel-cap-flag {
+  margin: 6px 2px 0;
+  color: #c0392b;
+  font-size: 12.5px;
+}
+
+.rel-cap-editor {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fafbfc;
+  margin: 0 0 10px;
+}
+
+.rel-cap-editor > summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  user-select: none;
+}
+
+.rel-cap-editor[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.rel-cap-editor > .side-hint {
+  padding: 8px 10px 0;
+  margin-bottom: 0;
+}
+
+.rel-cap-rows {
+  padding: 8px 10px 0;
+}
+
+.rel-cap-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+}
+
+.rel-cap-row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rel-cap-type {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12.5px;
+}
+
+.rel-cap-row-limits {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.rel-cap-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.rel-cap-num {
+  width: 58px;
+  padding: 4px 6px;
+  font-size: 12.5px;
+}
+
+.rel-cap-row-bad {
+  border-color: #e8a3a0;
+}
+
+.rel-cap-row-dup {
+  border-color: #ecd29a;
+}
+
+.rel-cap-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
