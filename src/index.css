@@ -2410,8 +2410,17 @@ button {
   background: #d9930f;
 }
 
+.relation-over-badge {
+  background: #d9534f;
+}
+
 .foot-relation {
   color: #b07a00;
+  font-weight: 600;
+}
+
+.foot-relation-over {
+  color: #c0392b;
   font-weight: 600;
 }
 
@@ -2650,4 +2659,147 @@ button.rel-end:hover {
 
 .rel-invalid-fold[open] summary {
   margin-bottom: 6px;
+}
+
+/* ---------- 关系基数上限审计 ---------- */
+
+.rel-cap-fold {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fafbfc;
+  padding: 0 10px;
+  margin: 0 0 10px;
+}
+
+.rel-cap-fold > summary {
+  cursor: pointer;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  user-select: none;
+}
+
+.rel-cap-fold > summary:hover {
+  color: #4338ca;
+}
+
+.rel-cap-fold[open] > summary {
+  border-bottom: 1px dashed var(--line);
+  margin-bottom: 8px;
+}
+
+.rel-cap-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rel-cap-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  position: relative;
+}
+
+.rel-cap-head {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+
+.rel-cap-head > span:last-child {
+  width: 44px;
+}
+
+.rel-cap-type,
+.rel-cap-num {
+  padding: 5px 8px;
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.rel-cap-num {
+  text-align: center;
+}
+
+.rel-cap-empty {
+  margin: 2px 0;
+}
+
+.rel-cap-row-err {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  margin: 2px 0 0;
+  color: var(--danger);
+  font-size: 11.5px;
+}
+
+.rel-cap-error {
+  margin: 8px 0 0;
+  color: var(--danger);
+  font-size: 12.5px;
+}
+
+.rel-cap-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.rel-summary-over {
+  color: #c0392b;
+}
+
+.rel-over-list {
+  border: 1px solid #f0b8b4;
+  border-radius: var(--radius);
+  background: #fdf4f3;
+  padding: 8px 10px 2px;
+  margin: 4px 0 10px;
+}
+
+.rel-over-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #b3261e;
+}
+
+.rel-over-hint {
+  display: block;
+  margin-top: 2px;
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+
+.rel-item-over {
+  border-color: #efb3af;
+  background: #fdf4f3;
+}
+
+.rel-over-reason {
+  margin: 6px 2px 0;
+  color: #b3261e;
+  font-size: 12.5px;
+}
+
+.rel-over-flag {
+  display: inline-block;
+  padding: 0 8px;
+  margin-right: 6px;
+  border-radius: 10px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  background: #d9534f;
+}
+
+.rel-over-source .rel-end:first-child,
+.rel-over-target .rel-end:last-child,
+.rel-over-both .rel-end {
+  border-color: #e8918d;
 }

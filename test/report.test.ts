@@ -191,6 +191,7 @@ function baseInput(): ReportInput {
     coverageIssues: 0,
     relationsActive: 0,
     relationsInvalid: 0,
+    relationOverLimit: 0,
   })
   assert.ok(report.html.includes('原文为空'), '空原文应有提示')
   assert.ok(report.html.includes('没有已绑定标注'))
@@ -199,6 +200,7 @@ function baseInput(): ReportInput {
   assert.ok(report.html.includes('未配置覆盖审计标签'))
   assert.ok(report.html.includes('没有有效关系'))
   assert.ok(report.html.includes('没有失效关系'))
+  assert.ok(report.html.includes('没有超出基数上限的有效关系'))
   console.log('  ✓ 空文档边界')
 }
 
@@ -232,6 +234,55 @@ function baseInput(): ReportInput {
   const chips = report.html.match(/class="rep-chip"/g) ?? []
   assert.strictEqual(chips.length, 3, '每条非空区间标注在其区间起点有一个序号芯片')
   console.log('  ✓ 多标注叠加与按原文位置编号')
+}
+
+// 8. 关系基数上限审计：规则随报告快照输出违规；不阻止关系存在
+{
+  const capText = '甲乙丙丁戊己'
+  const input: ReportInput = {
+    title: '基数文档',
+    text: capText,
+    annotations: [
+      mkAnn({ id: 'k1', quote: '甲', start: 0, end: 1 }),
+      mkAnn({ id: 'k2', quote: '乙', start: 1, end: 2 }),
+      mkAnn({ id: 'k3', quote: '丙', start: 2, end: 3 }),
+      mkAnn({ id: 'k4', quote: '丁', start: 3, end: 4 }),
+    ],
+    conflictRules: [],
+    ignoredConflicts: [],
+    coverageTags: [],
+    relations: [
+      // k1 的两条「支撑」出边：早的保留、晚的源端超限
+      { id: 'kr1', sourceId: 'k1', targetId: 'k2', type: '支撑', createdAt: 1 },
+      { id: 'kr2', sourceId: 'k1', targetId: 'k3', type: '支撑', createdAt: 2 },
+      // k4 收到两条「支撑」入边：kr1 之外还有 kr3 → kr3 目标端超限
+      { id: 'kr3', sourceId: 'k2', targetId: 'k4', type: '支撑', createdAt: 3 },
+      { id: 'kr4', sourceId: 'k3', targetId: 'k4', type: '支撑', createdAt: 4 },
+    ],
+    relationCardinalityRules: [
+      { id: 'kc1', type: '支撑', maxOut: 1, maxIn: 1, createdAt: 1 },
+    ],
+  }
+  const report = buildReviewReport(input, now)
+  // 出边：k1 有 kr1/kr2 → kr2 源端超限；k2 有 kr3 → 不超
+  // 入边：k4 有 kr3/kr4 → kr4 目标端超限
+  // 4 条关系全部有效；违规 2 条
+  assert.strictEqual(report.stats.relationsActive, 4)
+  assert.strictEqual(report.stats.relationsInvalid, 0)
+  assert.strictEqual(report.stats.relationOverLimit, 2)
+  assert.ok(report.html.includes('关系基数违规（2）'), '应有基数违规分区与计数')
+  assert.ok(report.html.includes('源端超限'), '应注明源端超限')
+  assert.ok(report.html.includes('目标端超限'), '应注明目标端超限')
+  assert.ok(report.html.includes('id="relation-over-1"'), '违规明细应有独立锚点')
+  assert.ok(report.html.includes('最多 1 条出边（实际 2 条）'), '应列名额与实际出边数')
+  assert.ok(report.html.includes('每条目标标注最多 1 条入边（实际 2 条）'), '应列名额与实际入边数')
+  // 有效关系分区内违规卡片带 rep-rel-over 样式
+  assert.ok(/id="relation-active-\d+" class="rep-rel rep-rel-over"/.test(report.html))
+  // 基数违规为 0 的报告不出现警告分区文案
+  const clean = buildReviewReport({ ...input, relationCardinalityRules: [] }, now)
+  assert.strictEqual(clean.stats.relationOverLimit, 0)
+  assert.ok(clean.html.includes('没有超出基数上限的有效关系'))
+  console.log('  ✓ 关系基数审计：源端/目标端违规标记、名额文案与统计')
 }
 
 console.log('\n审阅报告生成测试全部通过')

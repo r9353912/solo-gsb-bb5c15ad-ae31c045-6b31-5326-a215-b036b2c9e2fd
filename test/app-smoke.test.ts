@@ -1724,6 +1724,194 @@ console.log('  ✓ 冲突审阅面板（含忽略折叠与交叠高亮）渲染�
   console.log('  ✓ 标注关系：建立/禁自关联/禁重复、类型筛选、定位、待处理失效与恢复、删除失效、持久化')
 }
 
+// 关系基数上限审计：配置每源出边 / 每目标入边 → 违规实时列出（注明端）→ 不阻止建立 →
+// 删除关系后重算 → 规则随本地与导出保存 → 旧数据缺字段兼容
+{
+  const capText = '甲乙丙丁戊己庚辛'
+  const mk = (id: string, start: number) => ({
+    id,
+    quote: capText.slice(start, start + 1),
+    start,
+    end: start + 1,
+    note: '',
+    tags: [],
+    status: 'bound' as const,
+    createdAt: 1,
+    updatedAt: 1,
+    contextBefore: '',
+    contextAfter: '',
+  })
+  // 预置两条「支撑」关系（在导入数据中直接给出，避免 UI 逐条建立）：
+  // p1 → p2（早）、p1 → p3（晚）；配置 maxOut=1 后 p1→p3 源端超限
+  const capDoc = {
+    title: '基数文档',
+    text: capText,
+    updatedAt: Date.now(),
+    annotations: [mk('cap_a', 0), mk('cap_b', 1), mk('cap_c', 2), mk('cap_d', 3)],
+    relations: [
+      { id: 'cap_r1', sourceId: 'cap_a', targetId: 'cap_b', type: '支撑', createdAt: 100 },
+      { id: 'cap_r2', sourceId: 'cap_a', targetId: 'cap_c', type: '支撑', createdAt: 200 },
+    ],
+  }
+  localStorage.setItem('anchor-annotation-console:v1', JSON.stringify(capDoc))
+  const cc = document.createElement('div')
+  cc.id = 'rootcap'
+  document.body.appendChild(cc)
+  const cr = createRoot(cc)
+
+  await new Promise<void>((resolve) => {
+    cr.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 400)
+  })
+
+  const section = () => cc.querySelector('.relations-section') as HTMLElement
+  const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 120))
+  const saved = () => JSON.parse(localStorage.getItem('anchor-annotation-console:v1')!)
+  const setNativeValue = (el: HTMLInputElement | HTMLSelectElement, v: string) => {
+    const proto =
+      el instanceof window.HTMLSelectElement
+        ? window.HTMLSelectElement.prototype
+        : window.HTMLInputElement.prototype
+    Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(el, v)
+    el.dispatchEvent(new window.Event('input', { bubbles: true }))
+    el.dispatchEvent(new window.Event('change', { bubbles: true }))
+  }
+
+  assert.ok(section()!.textContent!.includes('基数上限审计'), '应渲染基数审计折叠入口')
+  // 未配置规则时无违规计数
+  assert.ok(!section()!.textContent!.includes('基数违规'), '无规则时不应出现违规统计')
+
+  // 展开基数规则折叠区
+  ;(section()!.querySelector('.rel-cap-fold > summary') as HTMLElement).click()
+  await wait()
+
+  // 添加一行：类型「支撑」，每源最大出边 1，每目标最大入边留空
+  ;([...section()!.querySelectorAll('.rel-cap-fold button')].find(
+    (b) => b.textContent?.trim() === '添加一行',
+  ) as HTMLButtonElement).click()
+  await wait()
+  setNativeValue(section()!.querySelector('.rel-cap-type') as HTMLInputElement, '支撑')
+  const numInputs = () => [...section()!.querySelectorAll('.rel-cap-num')] as HTMLInputElement[]
+  assert.strictEqual(numInputs().length, 2, '应有出边 / 入边两个名额输入')
+  setNativeValue(numInputs()[0]!, '1') // 出边
+  await wait()
+  ;([...section()!.querySelectorAll('.rel-cap-fold button')].find(
+    (b) => b.textContent?.trim() === '保存基数规则',
+  ) as HTMLButtonElement).click()
+  await wait()
+
+  const persisted = saved()
+  assert.strictEqual(persisted.relationCardinalityRules.length, 1, '基数规则应持久化')
+  assert.deepStrictEqual(
+    [
+      persisted.relationCardinalityRules[0].type,
+      persisted.relationCardinalityRules[0].maxOut,
+      persisted.relationCardinalityRules[0].maxIn,
+    ],
+    ['支撑', 1, null],
+  )
+
+  // 违规列表出现：cap_r2（p1→p3，创建更晚）源端超限；cap_r1 不违规
+  const overList = section()!.querySelector('.rel-over-list') as HTMLElement
+  assert.ok(overList, '应列出基数违规区')
+  assert.ok(overList.textContent!.includes('源端超限'), '应注明源端超限')
+  assert.ok(overList.textContent!.includes('最多 1 条出边（实际 2 条）'), '应列名额与实际数')
+  assert.ok(!overList.textContent!.includes('cap_r1'), '违规区只列超限关系（不显示 ID，但可校验卡片数）')
+  assert.strictEqual(overList.querySelectorAll('.rel-item').length, 1, '仅 1 条出边超限')
+  // 有效列表里的违规卡片带超限样式
+  assert.ok(
+    section()!.querySelectorAll('.rel-item-over').length >= 1,
+    '有效关系卡片应标红提示超限',
+  )
+  // 顶栏出现计数（失效 0 + 违规 1 = 1）
+  assert.ok(cc.innerHTML.includes('基数违规'), '汇总行应含基数违规计数')
+
+  // 点击违规关系的源端可定位原文（active 高亮）
+  ;(overList.querySelector('.rel-end') as HTMLButtonElement).click()
+  await wait()
+  assert.ok(section()!.querySelector('.rel-end-active'), '点击违规关系端点应可定位')
+
+  // 审计不阻止建立关系：再建一条 cap_b → cap_d「支撑」（cap_b 的第一条出边，不违规）
+  const selects = () => [...section()!.querySelectorAll('.rel-select')] as HTMLSelectElement[]
+  setNativeValue(selects()[0]!, 'cap_b')
+  setNativeValue(selects()[1]!, 'cap_d')
+  setNativeValue(section()!.querySelector('.rel-type-input') as HTMLInputElement, '支撑')
+  await wait()
+  const createBtn = [...section()!.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === '建立关系',
+  ) as HTMLButtonElement
+  assert.ok(!createBtn.disabled, '基数审计不应阻止建立关系')
+  createBtn.click()
+  await wait()
+  assert.strictEqual(saved().relations.length, 3, '超限只提示，不阻止建立')
+  assert.strictEqual(section()!.querySelectorAll('.rel-over-list .rel-item').length, 1, '新关系不超限')
+
+  // 删除超限关系 cap_r2 → 违规实时清空
+  const overCard = section()!.querySelector('.rel-over-list .rel-item') as HTMLElement
+  ;(globalThis as unknown as { confirm: () => boolean }).confirm = () => true
+  window.confirm = () => true
+  ;([...overCard.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === '删除关系',
+  ) as HTMLButtonElement).click()
+  await wait()
+  assert.ok(!section()!.querySelector('.rel-over-list'), '删除后审计实时重算，违规清空')
+
+  // 追加每目标入边 1 的限制并重建一条使 cap_b 入边超限：直接造数据后重挂载验证实时派生
+  {
+    const d = saved()
+    d.relations.push(
+      { id: 'cap_r3', sourceId: 'cap_c', targetId: 'cap_b', type: '支撑', createdAt: 300 },
+    )
+    d.updatedAt = Date.now()
+    localStorage.setItem('anchor-annotation-console:v1', JSON.stringify(d))
+  }
+  cr.unmount()
+  const cc2 = document.createElement('div')
+  cc2.id = 'rootcap2'
+  document.body.appendChild(cc2)
+  const cr2 = createRoot(cc2)
+  await new Promise<void>((resolve) => {
+    cr2.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 400)
+  })
+  const section2 = () => cc2.querySelector('.relations-section') as HTMLElement
+  // 此时规则只有 maxOut=1：各源出边均不超过 1；入边（cap_b 有 2 条）尚未配置名额 → 0 违规
+  assert.ok(!section2()!.querySelector('.rel-over-list'), '未配置入边名额时入边不审计')
+
+  // 打开编辑器补 maxIn=1 保存
+  ;(section2()!.querySelector('.rel-cap-fold > summary') as HTMLElement).click()
+  await wait()
+  const numInputs2 = () => [...section2()!.querySelectorAll('.rel-cap-num')] as HTMLInputElement[]
+  setNativeValue(numInputs2()[1]!, '1')
+  await wait()
+  ;([...section2()!.querySelectorAll('.rel-cap-fold button')].find(
+    (b) => b.textContent?.trim() === '保存基数规则',
+  ) as HTMLButtonElement).click()
+  await wait()
+  const over2 = section2()!.querySelector('.rel-over-list') as HTMLElement
+  assert.ok(over2, 'cap_b 有两条「支撑」入边（cap_r1 早、cap_r3 晚）→ 晚的目标端超限')
+  assert.ok(over2.textContent!.includes('目标端超限'))
+  assert.strictEqual(over2.querySelectorAll('.rel-item').length, 1)
+  assert.ok(over2.textContent!.includes('每条目标标注最多 1 条入边（实际 2 条）'))
+  // 更新后的规则持久化
+  const persisted2 = saved()
+  assert.deepStrictEqual(
+    [persisted2.relationCardinalityRules[0].maxOut, persisted2.relationCardinalityRules[0].maxIn],
+    [1, 1],
+  )
+  // 导出（localStorage 即导出数据来源）含基数规则字段
+  assert.ok(
+    Array.isArray(persisted2.relationCardinalityRules) &&
+      persisted2.relationCardinalityRules.length === 1,
+    '导出数据应含基数上限规则',
+  )
+
+  cr2.unmount()
+  cc.remove()
+  cc2.remove()
+  console.log('  ✓ 关系基数上限审计：规则配置持久化、源/目标超限实时列出且不阻止建立、删除与恢复重算')
+}
+
 // 旧版数据（无 conflictRules / ignoredConflicts 字段）应无损加载
 const legacy = {
   title: '旧文档',
@@ -1759,8 +1947,12 @@ assert.ok(Array.isArray(reparsed.reviewedDiffs) && reparsed.reviewedDiffs.length
 assert.strictEqual(reparsed.sampleConfig, null)
 assert.ok(Array.isArray(reparsed.sampleReviews) && reparsed.sampleReviews.length === 0)
 assert.ok(Array.isArray(reparsed.relations) && reparsed.relations.length === 0)
+assert.ok(
+  Array.isArray(reparsed.relationCardinalityRules) &&
+    reparsed.relationCardinalityRules.length === 0,
+)
 assert.strictEqual(reparsed.text, '一二三四五六')
-console.log('  ✓ 旧数据无损兼容并自动补齐冲突字段与标注关系空数组')
+console.log('  ✓ 旧数据无损兼容并自动补齐冲突字段、标注关系与基数规则空数组')
 
 root4.unmount()
 container4.remove()

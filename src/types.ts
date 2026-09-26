@@ -135,6 +135,25 @@ export interface AnnotationRelation {
   createdAt: number
 }
 
+/**
+ * 关系基数上限规则（按关系类型配置）：
+ * maxOut 为每条源标注允许的最大出边数，maxIn 为每条目标标注允许的最大入边数；
+ * 留空（null）表示该方向不限。仅审计有效关系（两端标注均存在且已绑定），
+ * 同一端点同一类型按创建时间、再按关系 ID 稳定排序，超出名额的关系列为违规。
+ * 审计只提示，不阻止建立关系。
+ */
+export interface RelationCardinalityRule {
+  /** 稳定 ID */
+  id: string
+  /** 关系类型（归一后非空，与 AnnotationRelation.type 精确匹配） */
+  type: string
+  /** 每条源标注允许的最大出边数；null 表示不限 */
+  maxOut: number | null
+  /** 每条目标标注允许的最大入边数；null 表示不限 */
+  maxIn: number | null
+  createdAt: number
+}
+
 export interface DocumentData {
   title: string
   text: string
@@ -155,6 +174,8 @@ export interface DocumentData {
   sampleReviews: SampleReview[]
   /** 标注之间的有向关系；任一端被删除或进入待处理时派生为失效，重新绑定后恢复 */
   relations: AnnotationRelation[]
+  /** 关系基数上限规则（按类型配置出边 / 入边上限，留空表示不限；旧数据缺省按空数组处理） */
+  relationCardinalityRules: RelationCardinalityRule[]
   updatedAt: number
 }
 
@@ -221,6 +242,14 @@ export interface ExportPayload {
     sourceId: string
     targetId: string
     type: string
+    createdAt: string
+  }>
+  /** 关系基数上限规则：按类型配置出边 / 入边上限（旧版文件缺省时按空数组处理） */
+  relationCardinalityRules: Array<{
+    id: string
+    type: string
+    maxOut: number | null
+    maxIn: number | null
     createdAt: string
   }>
   annotations: Array<{

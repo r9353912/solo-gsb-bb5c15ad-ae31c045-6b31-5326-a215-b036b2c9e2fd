@@ -1,14 +1,18 @@
 import { useEffect, useId, useMemo, useState } from 'react'
 import type { RefObject } from 'react'
-import type { Annotation } from '../types'
+import type { Annotation, RelationCardinalityRule } from '../types'
 import { badgeColor } from '../lib/segments'
 import {
+  CARDINALITY_SIDE_LABEL,
   RELATION_INVALID_REASON_LABEL,
+  cardinalityLimitText,
   isSelfRelation,
+  makeCardinalityRuleId,
   normalizeRelationType,
   relationKey,
   relationTypeFilters,
   sortRelationViews,
+  type CardinalityViolation,
   type RelationView,
 } from '../lib/relations'
 
@@ -16,6 +20,10 @@ interface Props {
   annotations: Annotation[]
   views: RelationView[]
   activeId: string | null
+  /** 基数上限审计结果（App 派生；无规则时 violations 为空） */
+  cardinality: CardinalityViolation[]
+  cardinalityRules: RelationCardinalityRule[]
+  onSaveCardinalityRules: (rules: RelationCardinalityRule[]) => void
   onCreate: (sourceId: string, targetId: string, type: string) => void
   onDelete: (id: string) => void
   /** 点击有效关系的一端：在原文中定位（仅已绑定标注可调用） */
@@ -94,14 +102,20 @@ function RelationEnd({
 function RelationCard({
   view,
   activeId,
+  violation,
   onFocus,
   onRebindStart,
   onDelete,
 }: {
   view: RelationView
+  violation?: CardinalityViolation
 } & Pick<Props, 'activeId' | 'onFocus' | 'onRebindStart' | 'onDelete'>) {
   return (
-    <div className={`rel-item ${view.active ? '' : 'rel-item-invalid'}`}>
+    <div
+      className={`rel-item ${view.active ? '' : 'rel-item-invalid'} ${
+        violation ? 'rel-item-over' : ''
+      }`}
+    >
       <div className="rel-ends">
         <RelationEnd
           role="源"
@@ -124,6 +138,14 @@ function RelationCard({
           onRebindStart={onRebindStart}
         />
       </div>
+      {violation && (
+        <p className="rel-over-reason" title={cardinalityLimitText(violation)}>
+          <span className={`rel-over-flag rel-over-${violation.side}`}>
+            {CARDINALITY_SIDE_LABEL[violation.side]}
+          </span>
+          {cardinalityLimitText(violation)}
+        </p>
+      )}
       {!view.active && view.invalidReason && (
         <p className="rel-invalid-reason">
           已失效：{RELATION_INVALID_REASON_LABEL[view.invalidReason]}
@@ -248,7 +270,203 @@ function RelationCreateForm({
   )
 }
 
-/** 标注关系侧栏分区：新建表单 + 类型筛选 + 有效 / 失效关系列表 */
+// ---------- 基数上限规则编辑 ----------
+
+interface DraftRule {
+  key: string // 行的稳定标识（已保存行为规则 id，新行为临时 id）
+  id: string | null // null = 尚未保存的新行
+  type: string
+  maxOut: string // 文本框原值；空串表示不限
+  maxIn: string
+}
+
+let draftSeq = 0
+function newDraftKey(): string {
+  draftSeq += 1
+  return `draft_${Date.now().toString(36)}_${draftSeq}`
+}
+
+function ruleToDraft(r: RelationCardinalityRule): DraftRule {
+  return { key: r.id, id: r.id, type: r.type, maxOut: r.maxOut === null ? '' : String(r.maxOut), maxIn: r.maxIn === null ? '' : String(r.maxIn) }
+}
+
+function parseLimitInput(raw: string): number | null | false {
+  const v = raw.trim()
+  if (v === '') return null
+  if (!/^\d+$/.test(v)) return false
+  const n = Number(v)
+  return n >= 1 ? n : false
+}
+
+/**
+ * 基数上限规则编辑器：每行一个关系类型 + 每源最大出边 / 每目标最大入边（留空不限）。
+ * 编辑只改本地草稿；点「保存基数规则」才写入文档，保存后审计实时重算。
+ */
+function CardinalityEditor({
+  rules,
+  existingTypes,
+  onSave,
+}: {
+  rules: RelationCardinalityRule[]
+  existingTypes: string[]
+  onSave: Props['onSaveCardinalityRules']
+}) {
+  const [drafts, setDrafts] = useState<DraftRule[]>(() => rules.map(ruleToDraft))
+  const [error, setError] = useState('')
+
+  // 外部规则变化（导入 / 其它入口）时同步草稿
+  useEffect(() => {
+    setDrafts(rules.map(ruleToDraft))
+  }, [rules])
+
+  const patch = (key: string, p: Partial<DraftRule>) => {
+    setError('')
+    setDrafts((ds) => ds.map((d) => (d.key === key ? { ...d, ...p } : d)))
+  }
+
+  const addRow = () => {
+    setError('')
+    const key = newDraftKey()
+    setDrafts((ds) => [...ds, { key, id: null, type: '', maxOut: '', maxIn: '' }])
+  }
+
+  const removeRow = (key: string) => {
+    setError('')
+    setDrafts((ds) => ds.filter((d) => d.key !== key))
+  }
+
+  const save = () => {
+    const out: RelationCardinalityRule[] = []
+    const seen = new Set<string>()
+    const now = Date.now()
+    const prevById = new Map(rules.map((r) => [r.id, r]))
+    for (const d of drafts) {
+      const type = normalizeRelationType(d.type)
+      if (!type) {
+        setError('存在未填写关系类型的行；请补全类型，或删除该行后再保存。')
+        return
+      }
+      if (seen.has(type)) {
+        setError(`关系类型「${type}」配置了多行；每种类型只能有一条基数规则。`)
+        return
+      }
+      const maxOut = parseLimitInput(d.maxOut)
+      const maxIn = parseLimitInput(d.maxIn)
+      if (maxOut === false || maxIn === false) {
+        setError(`「${type}」的名额必须是不小于 1 的整数（留空表示该方向不限）。`)
+        return
+      }
+      if (maxOut === null && maxIn === null) {
+        setError(`「${type}」的出边 / 入边名额不能同时留空；若不需限制请删除该行。`)
+        return
+      }
+      seen.add(type)
+      const prev = d.id ? prevById.get(d.id) : undefined
+      out.push({
+        id: d.id ?? makeCardinalityRuleId(),
+        type,
+        maxOut,
+        maxIn,
+        createdAt: prev?.createdAt ?? now,
+      })
+    }
+    onSave(out)
+    setDrafts(out.map(ruleToDraft))
+    setError('')
+  }
+
+  const discard = () => {
+    setDrafts(rules.map(ruleToDraft))
+    setError('')
+  }
+
+  return (
+    <details className="rel-cap-fold">
+      <summary>
+        基数上限审计{rules.length > 0 ? `（已配置 ${rules.length} 个类型）` : ''}
+      </summary>
+      <p className="side-hint">
+        按关系类型配置<strong>每条源标注允许的最大出边数</strong>与<strong>每条目标标注允许的最大入边数</strong>，
+        留空表示不限。仅统计<strong>有效关系</strong>；同一端点同一类型按创建时间、再按关系 ID 稳定排序，
+        超出名额的关系列为<strong>违规</strong>（注明源端 / 目标端 / 两者）。审计只提示，<strong>不会阻止建立关系</strong>；
+        关系增删、失效恢复或导入后自动重算。
+      </p>
+      <div className="rel-cap-table">
+        <div className="rel-cap-row rel-cap-head">
+          <span>关系类型</span>
+          <span>每源最大出边</span>
+          <span>每目标最大入边</span>
+          <span />
+        </div>
+        {drafts.length === 0 && (
+          <p className="side-hint rel-cap-empty">尚未配置任何类型；添加一行后填写名额并保存。</p>
+        )}
+        {drafts.map((d) => {
+          const seenType =
+            d.type.trim() !== '' &&
+            drafts.some((x) => x.key !== d.key && normalizeRelationType(x.type) === normalizeRelationType(d.type))
+          return (
+            <div className="rel-cap-row" key={d.key}>
+              <input
+                className="rule-input rel-cap-type"
+                list={`rel-cap-types-${d.key}`}
+                value={d.type}
+                placeholder="关系类型"
+                onChange={(e) => patch(d.key, { type: e.target.value })}
+              />
+              <datalist id={`rel-cap-types-${d.key}`}>
+                {existingTypes.map((t) => (
+                  <option key={t} value={t} />
+                ))}
+              </datalist>
+              <input
+                className="rule-input rel-cap-num"
+                type="number"
+                min={1}
+                step={1}
+                value={d.maxOut}
+                placeholder="不限"
+                onChange={(e) => patch(d.key, { maxOut: e.target.value })}
+              />
+              <input
+                className="rule-input rel-cap-num"
+                type="number"
+                min={1}
+                step={1}
+                value={d.maxIn}
+                placeholder="不限"
+                onChange={(e) => patch(d.key, { maxIn: e.target.value })}
+              />
+              <button
+                type="button"
+                className="btn btn-small btn-ghost btn-danger-text"
+                onClick={() => removeRow(d.key)}
+              >
+                删除
+              </button>
+              {seenType && <p className="rel-cap-row-err">该类型出现了多行配置</p>}
+            </div>
+          )
+        })}
+      </div>
+      {error && <p className="rel-cap-error">{error}</p>}
+      <div className="rel-cap-actions">
+        <button type="button" className="btn btn-small btn-ghost" onClick={addRow}>
+          添加一行
+        </button>
+        <span className="form-spacer" />
+        <button type="button" className="btn btn-small btn-ghost" onClick={discard}>
+          还原改动
+        </button>
+        <button type="button" className="btn btn-small btn-primary" onClick={save}>
+          保存基数规则
+        </button>
+      </div>
+    </details>
+  )
+}
+
+/** 标注关系侧栏分区：新建表单 + 基数审计 + 类型筛选 + 有效 / 失效关系列表 */
 export function RelationsSection(props: Props) {
   const { annotations, views } = props
   const [typeFilter, setTypeFilter] = useState<string>(ALL_TYPES)
@@ -271,9 +489,14 @@ export function RelationsSection(props: Props) {
   )
 
   const sorted = useMemo(() => sortRelationViews(views), [views])
+  const violationById = useMemo(
+    () => new Map(props.cardinality.map((c) => [c.view.relation.id, c])),
+    [props.cardinality],
+  )
   const matches = (v: RelationView) => typeFilter === ALL_TYPES || v.relation.type === typeFilter
   const activeViews = sorted.filter((v) => v.active && matches(v))
   const invalidViews = sorted.filter((v) => !v.active && matches(v))
+  const violationViews = props.cardinality.filter((c) => matches(c.view))
 
   // 每个类型的关系数（含失效），供筛选芯片展示
   const countByType = useMemo(() => {
@@ -295,11 +518,20 @@ export function RelationsSection(props: Props) {
       ref={(props.sectionRef as React.Ref<HTMLElement>) ?? undefined}
     >
       <h2
-        className={`side-heading ${invalidViews.length > 0 ? 'side-heading-relation' : ''}`}
+        className={`side-heading ${
+          invalidViews.length > 0 || violationViews.length > 0 ? 'side-heading-relation' : ''
+        }`}
       >
         标注关系
         {invalidViews.length > 0 && (
-          <span className="conflict-count-badge relation-count-badge">{invalidViews.length}</span>
+          <span className="conflict-count-badge relation-count-badge" title="失效关系数">
+            {invalidViews.length}
+          </span>
+        )}
+        {violationViews.length > 0 && (
+          <span className="conflict-count-badge relation-over-badge" title="基数上限违规关系数">
+            {violationViews.length}
+          </span>
         )}
       </h2>
       <p className="side-hint">
@@ -314,6 +546,12 @@ export function RelationsSection(props: Props) {
         existingKeys={existingKeys}
         existingTypes={types}
         onCreate={props.onCreate}
+      />
+
+      <CardinalityEditor
+        rules={props.cardinalityRules}
+        existingTypes={types}
+        onSave={props.onSaveCardinalityRules}
       />
 
       {views.length === 0 ? (
@@ -349,7 +587,36 @@ export function RelationsSection(props: Props) {
               {invalidViews.length}
             </strong>{' '}
             条
+            {props.cardinality.length > 0 && (
+              <>
+                {' '}· 基数违规{' '}
+                <strong className={violationViews.length > 0 ? 'rel-summary-over' : ''}>
+                  {violationViews.length}
+                </strong>{' '}
+                条
+              </>
+            )}
           </p>
+
+          {violationViews.length > 0 && (
+            <div className="rel-over-list">
+              <p className="rel-over-title">
+                基数上限违规（{violationViews.length}）
+                <span className="rel-over-hint">按创建时间、再按关系 ID 稳定判定；点击任一端定位原文</span>
+              </p>
+              {violationViews.map((c) => (
+                <RelationCard
+                  key={`over-${c.view.relation.id}`}
+                  view={c.view}
+                  violation={c}
+                  activeId={props.activeId}
+                  onFocus={props.onFocus}
+                  onRebindStart={props.onRebindStart}
+                  onDelete={props.onDelete}
+                />
+              ))}
+            </div>
+          )}
 
           {activeViews.length === 0 ? (
             <p className="side-hint">该筛选下没有有效关系。</p>
@@ -358,6 +625,7 @@ export function RelationsSection(props: Props) {
               <RelationCard
                 key={v.relation.id}
                 view={v}
+                violation={violationById.get(v.relation.id)}
                 activeId={props.activeId}
                 onFocus={props.onFocus}
                 onRebindStart={props.onRebindStart}

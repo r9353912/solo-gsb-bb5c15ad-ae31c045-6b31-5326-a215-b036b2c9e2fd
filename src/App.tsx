@@ -5,6 +5,7 @@ import type {
   DocumentData,
   ExportPayload,
   IgnoredConflict,
+  RelationCardinalityRule,
   SampleReview,
   SampleTarget,
   SampleVerdict,
@@ -54,9 +55,11 @@ import {
   sampleReviewKey,
 } from './lib/sampling'
 import {
+  auditRelationCardinality,
   buildRelationViews,
   isSelfRelation,
   makeRelationId,
+  normalizeCardinalityRules,
   normalizeRelations,
   relationKey,
   relationStats,
@@ -97,6 +100,7 @@ const EMPTY_DOC: DocumentData = {
   sampleConfig: null,
   sampleReviews: [],
   relations: [],
+  relationCardinalityRules: [],
   updatedAt: Date.now(),
 }
 
@@ -266,6 +270,13 @@ export default function App() {
   )
   const relationSummary = useMemo(() => relationStats(relationViews), [relationViews])
   const invalidRelationCount = relationSummary.invalid
+
+  // 基数上限审计：纯派生。关系增删、两端状态变化（失效 / 恢复）、规则增删改、导入后随依赖自动重算
+  const relationCardinality = useMemo(
+    () => auditRelationCardinality(relationViews, doc.relationCardinalityRules),
+    [relationViews, doc.relationCardinalityRules],
+  )
+  const relationOverCount = relationCardinality.count
 
   const highlightIds: string[] = activePairIds
     ? [...activePairIds]
@@ -625,6 +636,11 @@ export default function App() {
     }))
   }
 
+  /** 保存基数上限规则（编辑器已校验类型与名额），保存后审计随 memo 实时重算 */
+  const saveRelationCardinalityRules = (rules: RelationCardinalityRule[]) => {
+    setDoc((d) => ({ ...d, relationCardinalityRules: rules, updatedAt: Date.now() }))
+  }
+
   const scrollToRelations = () => {
     relationsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
@@ -783,6 +799,13 @@ export default function App() {
         type: r.type,
         createdAt: new Date(r.createdAt).toISOString(),
       })),
+      relationCardinalityRules: doc.relationCardinalityRules.map((r) => ({
+        id: r.id,
+        type: r.type,
+        maxOut: r.maxOut,
+        maxIn: r.maxIn,
+        createdAt: new Date(r.createdAt).toISOString(),
+      })),
       annotations: doc.annotations.map((a) => ({
         id: a.id,
         status: a.status,
@@ -872,6 +895,8 @@ export default function App() {
       // 有效性不在导入时裁决：引用待处理 / 已不存在标注的关系保留为失效记录，
       // 重新绑定后可自动恢复（引用完全缺失 ID 时只显示失效，不丢弃）。
       const relations = normalizeRelations(parsed.relations)
+      // 旧版导出文件不含基数上限规则：无损补空；规则只按类型生效，与关系是否存在无关
+      const relationCardinalityRules = normalizeCardinalityRules(parsed.relationCardinalityRules)
       setDoc({
         title: parsed.document.title,
         text: parsed.document.text,
@@ -890,6 +915,7 @@ export default function App() {
         sampleConfig,
         sampleReviews,
         relations,
+        relationCardinalityRules,
         updatedAt: Date.now(),
       })
       setMode('view')
@@ -938,6 +964,7 @@ export default function App() {
       ignoredConflicts: doc.ignoredConflicts,
       coverageTags: doc.coverageTags,
       relations: doc.relations,
+      relationCardinalityRules: doc.relationCardinalityRules,
     })
     downloadHtmlFile(report.filename, report.html)
   }
@@ -1019,12 +1046,14 @@ export default function App() {
           )}
           {mode === 'view' && (
             <button
-              className={`btn ${invalidRelationCount > 0 ? 'btn-warn' : 'btn-ghost'}`}
+              className={`btn ${invalidRelationCount + relationOverCount > 0 ? 'btn-warn' : 'btn-ghost'}`}
               onClick={scrollToRelations}
-              title="在两条已绑定标注之间建立有向关系；失效关系在此恢复或清理"
+              title="在两条已绑定标注之间建立有向关系；失效关系与基数上限违规在此审阅"
             >
               标注关系
-              {invalidRelationCount > 0 && <span className="topbar-count">{invalidRelationCount}</span>}
+              {(invalidRelationCount + relationOverCount > 0) && (
+                <span className="topbar-count">{invalidRelationCount + relationOverCount}</span>
+              )}
             </button>
           )}
           <button className="btn btn-ghost" onClick={() => fileInputRef.current?.click()}>
@@ -1124,6 +1153,9 @@ export default function App() {
               {relationSummary.total > 0 && invalidRelationCount > 0 && (
                 <span className="foot-relation">（{invalidRelationCount} 条关系失效）</span>
               )}
+              {relationOverCount > 0 && (
+                <span className="foot-relation-over">（{relationOverCount} 条关系基数超限）</span>
+              )}
               {' '}· 数据自动保存在本浏览器
             </footer>
           </section>
@@ -1158,6 +1190,9 @@ export default function App() {
             samplingSectionRef={samplingSectionRef}
             datasetSplitSectionRef={datasetSplitSectionRef}
             relationViews={relationViews}
+            relationCardinality={relationCardinality.violations}
+            relationCardinalityRules={doc.relationCardinalityRules}
+            onSaveRelationCardinalityRules={saveRelationCardinalityRules}
             onCreateRelation={createRelation}
             onDeleteRelation={deleteRelation}
             relationsSectionRef={relationsSectionRef}

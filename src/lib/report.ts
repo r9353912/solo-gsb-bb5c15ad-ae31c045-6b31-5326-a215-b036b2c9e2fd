@@ -2,19 +2,21 @@
 //
 // 纯函数：只读取传入数据、不修改任何字段、不触碰 localStorage。
 // 报告内容：
-//   1. 开头汇总：标注总数、待处理数、未忽略冲突数、覆盖问题数；
+//   1. 开头汇总：标注总数、待处理数、未忽略冲突数、覆盖问题数、有效 / 失效关系数、基数违规数；
 //   2. 按原文位置渲染的全文：已绑定标注的高亮（多色叠加）、冲突交叠描边、覆盖缺口/重叠底色，
 //      段首上标序号可跳到对应标注明细；
 //   3. 已绑定标注明细（引文、位置、标签、备注）；
 //   4. 待处理标注（引文、标签、备注、待处理原因）；
 //   5. 未忽略冲突及冲突双方（引文、标签、位置、备注、交叠原文）；
-//   6. 覆盖审计问题（缺口 / 重叠的原文摘录、位置与涉及标注）。
+//   6. 覆盖审计问题（缺口 / 重叠的原文摘录、位置与涉及标注）；
+//   7. 标注关系：有效关系（基数违规注明源端 / 目标端 / 两者）、基数违规汇总、失效关系（注明原因）。
 
 import type {
   Annotation,
   AnnotationRelation,
   ConflictRule,
   IgnoredConflict,
+  RelationCardinalityRule,
 } from '../types'
 import {
   badgeColor,
@@ -28,7 +30,10 @@ import {
 } from './conflicts'
 import { auditCoverage } from './coverage'
 import {
+  auditRelationCardinality,
   buildRelationViews,
+  cardinalityLimitText,
+  CARDINALITY_SIDE_LABEL,
   relationStats,
   RELATION_INVALID_REASON_LABEL,
   sortRelationViews,
@@ -43,6 +48,8 @@ export interface ReportInput {
   coverageTags: string[]
   /** 标注之间的有向关系（旧版调用方缺省时按空数组处理） */
   relations?: AnnotationRelation[]
+  /** 关系基数上限规则（旧版调用方缺省时按空数组处理：无违规） */
+  relationCardinalityRules?: RelationCardinalityRule[]
 }
 
 export interface ReportStats {
@@ -58,6 +65,8 @@ export interface ReportStats {
   relationsActive: number
   /** 失效关系数（任一端被删除或进入待处理） */
   relationsInvalid: number
+  /** 基数上限违规关系数（去重：同一条源 / 目标都超限只算一条） */
+  relationOverLimit: number
 }
 
 export interface ReviewReport {
@@ -144,8 +153,12 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
 
   // 标注关系：有效性由两端标注派生（与侧栏口径一致）
   const relations = input.relations ?? []
+  const cardinalityRules = input.relationCardinalityRules ?? []
   const relationViews = sortRelationViews(buildRelationViews(relations, annotations))
   const relStats = relationStats(relationViews)
+  // 基数上限审计：仅统计有效关系（与侧栏同一纯函数）
+  const cardinality = auditRelationCardinality(relationViews, cardinalityRules)
+  const overById = cardinality.violationById
 
   const pendingAnnotations = annotations
     .filter((a) => a.status === 'pending')
@@ -181,6 +194,7 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
     coverageIssues: coverage.gapCount + coverage.overlapCount,
     relationsActive: relStats.active,
     relationsInvalid: relStats.invalid,
+    relationOverLimit: cardinality.count,
   }
 
   // ---------- 原文（按位置渲染高亮 / 冲突 / 覆盖问题） ----------
@@ -376,16 +390,22 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
   const buildRelationItem = (
     v: (typeof relationViews)[number],
     i: number,
-    section: 'active' | 'invalid',
+    idPrefix: 'active' | 'invalid' | 'over',
   ): string => {
-    const cls = v.active ? 'rep-rel' : 'rep-rel rep-rel-invalid'
+    const over = overById.get(v.relation.id)
+    const cls = `${v.active ? 'rep-rel' : 'rep-rel rep-rel-invalid'}${over ? ' rep-rel-over' : ''}`
+    const overState = over
+      ? `<p class="rep-rel-over"><span class="rep-rel-over-flag rep-rel-over-${over.side}">${
+          CARDINALITY_SIDE_LABEL[over.side]
+        }</span>${escapeHtml(cardinalityLimitText(over))}</p>`
+      : ''
     const state = v.active
-      ? ''
+      ? overState
       : `<p class="rep-rel-reason">已失效：${
           v.invalidReason ? escapeHtml(RELATION_INVALID_REASON_LABEL[v.invalidReason]) : ''
         }</p>`
     return (
-      `<li id="relation-${section}-${i + 1}" class="${cls}">` +
+      `<li id="relation-${idPrefix}-${i + 1}" class="${cls}">` +
       `<div class="rep-rel-type"><span class="rep-rel-type-pill">${escapeHtml(v.relation.type)}</span></div>` +
       `<div class="rep-rel-sides">` +
       relationEnd('源', v.source, '源标注已删除') +
@@ -403,6 +423,10 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
     .join('')
   const invalidRelationItems = invalidRelationViews
     .map((v, i) => buildRelationItem(v, i, 'invalid'))
+    .join('')
+  // 基数违规明细：按审计自身的稳定顺序（创建时间 → 关系 ID）列出
+  const overRelationItems = cardinality.violations
+    .map((c, i) => buildRelationItem(c.view, i, 'over'))
     .join('')
 
   // ---------- 组装 ----------
@@ -437,8 +461,9 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
       <li class="rep-stat${stats.coverageIssues > 0 ? ' rep-stat-warn' : ''}"><span class="rep-stat-num">${stats.coverageIssues}</span><span class="rep-stat-label">覆盖问题</span></li>
       <li class="rep-stat"><span class="rep-stat-num">${stats.relationsActive}</span><span class="rep-stat-label">有效关系</span></li>
       <li class="rep-stat${stats.relationsInvalid > 0 ? ' rep-stat-warn' : ''}"><span class="rep-stat-num">${stats.relationsInvalid}</span><span class="rep-stat-label">失效关系</span></li>
+      <li class="rep-stat${stats.relationOverLimit > 0 ? ' rep-stat-warn' : ''}"><span class="rep-stat-num">${stats.relationOverLimit}</span><span class="rep-stat-label">基数违规</span></li>
     </ul>
-    <p class="rep-meta">冲突仅统计未忽略项${ignoredConflictCount > 0 ? `（另有 ${ignoredConflictCount} 条已忽略）` : ''}；覆盖问题为缺口与重叠之和。有效关系要求两端标注均存在且已绑定；任一端删除或待处理即计入失效关系。</p>
+    <p class="rep-meta">冲突仅统计未忽略项${ignoredConflictCount > 0 ? `（另有 ${ignoredConflictCount} 条已忽略）` : ''}；覆盖问题为缺口与重叠之和。有效关系要求两端标注均存在且已绑定；任一端删除或待处理即计入失效关系。基数违规仅统计有效关系：同一端点同一类型按创建时间、再按关系 ID 排序后超出每源出边 / 每目标入边名额的关系；同一条两端都超限时只计一条。</p>
   </section>
 
   <section class="rep-section">
@@ -489,6 +514,15 @@ export function buildReviewReport(input: ReportInput, now: Date = new Date()): R
       activeRelationViews.length === 0
         ? '<p class="rep-muted">没有有效关系。</p>'
         : `<ol class="rep-rel-list">${activeRelationItems}</ol>`
+    }
+  </section>
+
+  <section class="rep-section">
+    <h2>关系基数违规（${cardinality.count}）</h2>
+    ${
+      cardinality.count === 0
+        ? '<p class="rep-muted">没有超出基数上限的有效关系。</p>'
+        : `<p class="rep-meta">仅统计有效关系；同一端点同一类型按创建时间、再按关系 ID 稳定排序，超出每源出边 / 每目标入边名额的关系列出如下（同一条两端都超限只列一次）。</p><ol class="rep-rel-list">${overRelationItems}</ol>`
     }
   </section>
 
@@ -630,6 +664,13 @@ body {
   scroll-margin-top: 12px;
 }
 .rep-rel-invalid { border-color: #e5c07b; background: #fdf8ec; }
+.rep-rel-over { border-color: #efb3af; background: #fdf4f3; box-shadow: inset 3px 0 0 #d9534f; }
+p.rep-rel-over { color: #b3261e; margin: 8px 0 2px; font-size: 13px; }
+.rep-rel-over-flag {
+  display: inline-block; margin-right: 8px; padding: 1px 10px;
+  border-radius: 10px; color: #fff; font-size: 12.5px; font-weight: 700;
+  background: #d9534f;
+}
 .rep-rel-type { margin: 2px 0 8px; }
 .rep-rel-type-pill {
   display: inline-block; padding: 1px 10px;

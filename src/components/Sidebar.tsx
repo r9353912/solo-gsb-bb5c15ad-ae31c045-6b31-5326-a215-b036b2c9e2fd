@@ -4,6 +4,7 @@ import type {
   Annotation,
   AnnotationBaseline,
   ConflictRule,
+  RelationCardinalityRule,
   SampleConfig,
   SampleReview,
   SampleTarget,
@@ -15,7 +16,7 @@ import type { ConflictItem } from '../lib/conflicts'
 import type { CoverageIssue, CoverageResult } from '../lib/coverage'
 import type { SnapshotDiffItem } from '../lib/snapshot'
 import type { SampleQueueResult } from '../lib/sampling'
-import type { RelationView } from '../lib/relations'
+import type { CardinalityViolation, RelationView } from '../lib/relations'
 import { SnapshotSection } from './SnapshotSection'
 import { SamplingSection } from './SamplingSection'
 import { DatasetSplitSection } from './DatasetSplitSection'
@@ -64,6 +65,10 @@ interface Props {
   datasetSplitSectionRef?: RefObject<HTMLElement | null>
   /** 标注关系 */
   relationViews: RelationView[]
+  /** 关系基数上限审计违规（App 派生） */
+  relationCardinality: CardinalityViolation[]
+  relationCardinalityRules: RelationCardinalityRule[]
+  onSaveRelationCardinalityRules: (rules: RelationCardinalityRule[]) => void
   onCreateRelation: (sourceId: string, targetId: string, type: string) => void
   onDeleteRelation: (id: string) => void
   /** 标注关系分区的滚动定位 ref（顶栏按钮用） */
@@ -487,6 +492,7 @@ export const Sidebar = forwardRef<HTMLElement, Props>(function Sidebar(props, se
     props.coverageResult.gapCount + props.coverageResult.overlapCount
   const activeRelationCount = props.relationViews.filter((v) => v.active).length
   const invalidRelationReportCount = props.relationViews.length - activeRelationCount
+  const relationOverCount = props.relationCardinality.length
   // 批量操作筛选用：仅当前标注中实际使用的标签（标签重命名 / 删除后随之更新）
   const annotationTagSet = new Set<string>()
   props.annotations.forEach((a) => a.tags.forEach((t) => annotationTagSet.add(t)))
@@ -498,8 +504,8 @@ export const Sidebar = forwardRef<HTMLElement, Props>(function Sidebar(props, se
         <h2 className="side-heading">审阅报告</h2>
         <p className="side-hint">
           按<strong>当前文档快照</strong>生成并下载一个自包含 HTML 报告：开头汇总
-          <strong>标注总数 / 待处理 / 冲突 / 覆盖问题 / 有效关系 / 失效关系</strong>，正文按原文位置渲染已绑定标注的
-          <strong>高亮、引文、标签与备注</strong>，并列出全部待处理标注、冲突双方与有效 / 失效关系明细。
+          <strong>标注总数 / 待处理 / 冲突 / 覆盖问题 / 有效关系 / 失效关系 / 基数违规</strong>，正文按原文位置渲染已绑定标注的
+          <strong>高亮、引文、标签与备注</strong>，并列出全部待处理标注、冲突双方与有效 / 失效关系明细（违规关系注明源端 / 目标端超限）。
           报告在浏览器本地生成，<strong>不会修改本地数据</strong>，可离线打开与打印。
         </p>
         <ul className="report-summary">
@@ -520,6 +526,9 @@ export const Sidebar = forwardRef<HTMLElement, Props>(function Sidebar(props, se
           </li>
           <li className={invalidRelationReportCount > 0 ? 'report-summary-warn' : ''}>
             失效关系 <strong>{invalidRelationReportCount}</strong>
+          </li>
+          <li className={relationOverCount > 0 ? 'report-summary-warn' : ''}>
+            基数违规 <strong>{relationOverCount}</strong>
           </li>
         </ul>
         <button
@@ -693,6 +702,9 @@ export const Sidebar = forwardRef<HTMLElement, Props>(function Sidebar(props, se
         annotations={props.annotations}
         views={props.relationViews}
         activeId={props.activeId}
+        cardinality={props.relationCardinality}
+        cardinalityRules={props.relationCardinalityRules}
+        onSaveCardinalityRules={props.onSaveRelationCardinalityRules}
         onCreate={props.onCreateRelation}
         onDelete={props.onDeleteRelation}
         onFocus={props.onFocus}
